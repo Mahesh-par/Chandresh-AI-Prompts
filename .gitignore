@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+
+# Environment secrets (keep .env.example files committed)
+.env
+
+# Build output
+dist/
+build/
+coverage/
+
+# Logs
+*.log
+
+# Puppeteer Chrome session profiles
+.chrome-session/
+.chrome-session-*/
+
+# Vite / TypeScript cache
+.vite/
+*.tsbuildinfo
+
+# OS files
+.DS_Store
+Thumbs.db

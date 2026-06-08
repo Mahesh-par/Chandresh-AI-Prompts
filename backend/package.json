@@ -1,0 +1,31 @@
+{
+  "name": "claude-scraper-backend",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node --import tsx src/server.ts",
+    "dev": "nodemon --exec tsx src/server.ts",
+    "login": "tsx src/scripts/login.ts 1",
+    "login2": "tsx src/scripts/login.ts 2",
+    "login3": "tsx src/scripts/login.ts 3",
+    "login4": "tsx src/scripts/login.ts 4",
+    "login5": "tsx src/scripts/login.ts 5"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^17.4.2",
+    "express": "^4.18.2",
+    "mongoose": "^9.6.3",
+    "puppeteer": "^21.0.0"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.15",
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "nodemon": "^3.1.0",
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.2"
+  }
+}
