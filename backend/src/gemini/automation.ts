@@ -358,18 +358,18 @@ async function saveImageFromSrc(
       return { error: "Generated image source URL not found." };
     }
 
-    const imageToBytes = async (image: HTMLImageElement): Promise<number[]> => {
-      if (image.src.startsWith("blob:")) {
+    try {
+      if (latest.src.startsWith("blob:")) {
         const canvas = document.createElement("canvas");
-        canvas.width = image.naturalWidth || image.width;
-        canvas.height = image.naturalHeight || image.height;
+        canvas.width = latest.naturalWidth || latest.width;
+        canvas.height = latest.naturalHeight || latest.height;
         const context = canvas.getContext("2d");
 
         if (!context) {
           throw new Error("Canvas context unavailable.");
         }
 
-        context.drawImage(image, 0, 0);
+        context.drawImage(latest, 0, 0);
         const blob = await new Promise<Blob | null>((resolve) =>
           canvas.toBlob(resolve, "image/png"),
         );
@@ -379,21 +379,16 @@ async function saveImageFromSrc(
         }
 
         const buffer = await blob.arrayBuffer();
-        return Array.from(new Uint8Array(buffer));
+        return { bytes: Array.from(new Uint8Array(buffer)) };
       }
 
-      const response = await fetch(image.src);
+      const response = await fetch(latest.src);
       if (!response.ok) {
         throw new Error(`Image fetch failed with status ${response.status}`);
       }
 
       const buffer = await response.arrayBuffer();
-      return Array.from(new Uint8Array(buffer));
-    };
-
-    try {
-      const bytes = await imageToBytes(latest);
-      return { bytes };
+      return { bytes: Array.from(new Uint8Array(buffer)) };
     } catch (error) {
       return {
         error: error instanceof Error ? error.message : "Image save failed",
