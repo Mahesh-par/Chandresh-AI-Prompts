@@ -275,12 +275,63 @@ async function waitForGenerationOutcome(
   return "no_image";
 }
 
+function getWorkerDownloadDir(
+  projectFolder: string,
+  sessionId: number,
+): string {
+  return path.join(projectFolder, ".downloads", `chrome-${sessionId}`);
+}
+
+async function ensureDirectory(folder: string): Promise<void> {
+  await fs.mkdir(folder, { recursive: true });
+}
+
+function getFinalImagePath(projectFolder: string, blockId: string): string {
+  return path.join(projectFolder, sanitizeFileName(`${blockId}.png`));
+}
+
+async function waitForImageElementReady(
+  page: Page,
+  imageCountBefore: number,
+): Promise<void> {
+  await page.waitForFunction(
+    (selectors, prevCount) => {
+      const images: HTMLImageElement[] = [];
+
+      for (const selector of selectors) {
+        images.push(
+          ...Array.from(
+            document.querySelectorAll(selector),
+          ) as HTMLImageElement[],
+        );
+      }
+
+      const validImages = images.filter(
+        (image) =>
+          !!image.src &&
+          (image.src.startsWith("blob:") || image.src.startsWith("http")),
+      );
+
+      if (validImages.length <= prevCount) {
+        return false;
+      }
+
+      const latest = validImages[validImages.length - 1];
+      return latest.complete && latest.naturalWidth > 0;
+    },
+    { timeout: env.geminiImageDetectTimeoutMs },
+    GENERATED_IMAGE_SELECTORS,
+    imageCountBefore,
+  );
+}
+
 async function saveImageFromSrc(
   page: Page,
   imageCountBefore: number,
-  projectFolder: string,
-  blockId: string,
-): Promise<string> {
+  savePath: string,
+): Promise<void> {
+  await waitForImageElementReady(page, imageCountBefore);
+
   const imageData = await page.evaluate(async (selectors, prevCount) => {
     const allImages: HTMLImageElement[] = [];
 
@@ -307,17 +358,45 @@ async function saveImageFromSrc(
       return { error: "Generated image source URL not found." };
     }
 
-    try {
-      const response = await fetch(latest.src);
+    const imageToBytes = async (image: HTMLImageElement): Promise<number[]> => {
+      if (image.src.startsWith("blob:")) {
+        const canvas = document.createElement("canvas");
+        canvas.width = image.naturalWidth || image.width;
+        canvas.height = image.naturalHeight || image.height;
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+          throw new Error("Canvas context unavailable.");
+        }
+
+        context.drawImage(image, 0, 0);
+        const blob = await new Promise<Blob | null>((resolve) =>
+          canvas.toBlob(resolve, "image/png"),
+        );
+
+        if (!blob) {
+          throw new Error("Failed to convert image to blob.");
+        }
+
+        const buffer = await blob.arrayBuffer();
+        return Array.from(new Uint8Array(buffer));
+      }
+
+      const response = await fetch(image.src);
       if (!response.ok) {
-        return { error: `Image fetch failed with status ${response.status}` };
+        throw new Error(`Image fetch failed with status ${response.status}`);
       }
 
       const buffer = await response.arrayBuffer();
-      return { bytes: Array.from(new Uint8Array(buffer)) };
+      return Array.from(new Uint8Array(buffer));
+    };
+
+    try {
+      const bytes = await imageToBytes(latest);
+      return { bytes };
     } catch (error) {
       return {
-        error: error instanceof Error ? error.message : "Image fetch failed",
+        error: error instanceof Error ? error.message : "Image save failed",
       };
     }
   }, GENERATED_IMAGE_SELECTORS, imageCountBefore);
@@ -330,10 +409,7 @@ async function saveImageFromSrc(
     );
   }
 
-  const fileName = sanitizeFileName(`${blockId}.png`);
-  const savePath = path.join(projectFolder, fileName);
   await fs.writeFile(savePath, Buffer.from(imageData.bytes));
-  return savePath;
 }
 
 async function listFolderFiles(folder: string): Promise<string[]> {
@@ -360,8 +436,13 @@ async function waitForDownloadedFile(
     );
 
     if (downloaded) {
-      await delay(1000);
-      return path.join(folder, downloaded);
+      const downloadedPath = path.join(folder, downloaded);
+      const stats = await fs.stat(downloadedPath).catch(() => null);
+
+      if (stats && stats.size > 0) {
+        await delay(1000);
+        return downloadedPath;
+      }
     }
 
     await delay(500);
@@ -370,75 +451,123 @@ async function waitForDownloadedFile(
   throw new Error("Timed out waiting for image download.");
 }
 
-async function downloadViaButton(
-  page: Page,
-  projectFolder: string,
-  blockId: string,
-): Promise<string> {
-  const client = await page.createCDPSession();
-  await client.send("Page.setDownloadBehavior", {
-    behavior: "allow",
-    downloadPath: projectFolder,
-  });
-
+async function clickLatestDownloadButton(page: Page): Promise<boolean> {
   const imageButtons = await page.$$("button.image-button");
   const latestImageButton = imageButtons[imageButtons.length - 1];
 
   if (!latestImageButton) {
-    throw new Error("Generated image container not found.");
+    return false;
   }
 
   await latestImageButton.scrollIntoView();
   await latestImageButton.hover();
-  await delay(800);
+  await delay(1200);
 
-  const existingFiles = new Set(await listFolderFiles(projectFolder));
+  const clickedInContext = await page.evaluate(() => {
+    const imageButtons = Array.from(
+      document.querySelectorAll("button.image-button"),
+    );
+    const latestImageButton = imageButtons[imageButtons.length - 1];
+
+    if (!latestImageButton) {
+      return false;
+    }
+
+    let container: Element | null = latestImageButton;
+
+    for (let depth = 0; depth < 8 && container; depth += 1) {
+      const downloadButton = container.querySelector(
+        'button[aria-label="Download full-sized image"]',
+      ) as HTMLButtonElement | null;
+
+      if (downloadButton) {
+        downloadButton.click();
+        return true;
+      }
+
+      container = container.parentElement;
+    }
+
+    const fallbackButtons = Array.from(
+      document.querySelectorAll('button[aria-label="Download full-sized image"]'),
+    ) as HTMLButtonElement[];
+
+    const fallback = fallbackButtons[fallbackButtons.length - 1];
+    if (fallback) {
+      fallback.click();
+      return true;
+    }
+
+    return false;
+  });
+
+  if (clickedInContext) {
+    return true;
+  }
+
   const downloadButtons = await page.$$(DOWNLOAD_BUTTON_SELECTOR);
   const latestDownloadButton = downloadButtons[downloadButtons.length - 1];
 
   if (!latestDownloadButton) {
-    throw new Error("Download full-sized image button not found.");
+    return false;
   }
 
   await latestDownloadButton.click();
+  return true;
+}
+
+async function downloadViaButton(
+  page: Page,
+  workerDownloadDir: string,
+  finalSavePath: string,
+): Promise<void> {
+  await ensureDirectory(workerDownloadDir);
+
+  const client = await page.createCDPSession();
+  await client.send("Page.setDownloadBehavior", {
+    behavior: "allow",
+    downloadPath: workerDownloadDir,
+  });
+
+  const existingFiles = new Set(await listFolderFiles(workerDownloadDir));
+  const clicked = await clickLatestDownloadButton(page);
+
+  if (!clicked) {
+    throw new Error("Download full-sized image button not found.");
+  }
+
   const downloadedPath = await waitForDownloadedFile(
-    projectFolder,
+    workerDownloadDir,
     existingFiles,
   );
 
-  const targetName = sanitizeFileName(`${blockId}${path.extname(downloadedPath) || ".png"}`);
-  const targetPath = path.join(projectFolder, targetName);
-
-  if (downloadedPath !== targetPath) {
-    await fs.rename(downloadedPath, targetPath);
-  }
-
-  return targetPath;
+  await fs.copyFile(downloadedPath, finalSavePath);
+  await fs.unlink(downloadedPath).catch(() => undefined);
 }
 
 async function downloadLatestGeneratedImage(
   page: Page,
   imageCountBefore: number,
   projectFolder: string,
+  workerDownloadDir: string,
   blockId: string,
 ): Promise<string> {
+  const finalSavePath = getFinalImagePath(projectFolder, blockId);
+  await ensureDirectory(path.dirname(finalSavePath));
+  await ensureDirectory(workerDownloadDir);
+
   try {
-    const savePath = await saveImageFromSrc(
-      page,
-      imageCountBefore,
-      projectFolder,
-      blockId,
-    );
-    console.log(`Saved image to: ${savePath}`);
-    return savePath;
+    await saveImageFromSrc(page, imageCountBefore, finalSavePath);
+    console.log(`Saved image to: ${finalSavePath}`);
+    return finalSavePath;
   } catch (srcError) {
     console.log(
       "Direct image save failed, trying download button:",
       srcError instanceof Error ? srcError.message : srcError,
     );
-    const savePath = await downloadViaButton(page, projectFolder, blockId);
-    console.log(`Downloaded image to: ${savePath}`);
-    return savePath;
+    await downloadViaButton(page, workerDownloadDir, finalSavePath);
+    console.log(`Downloaded image to: ${finalSavePath}`);
+    return finalSavePath;
   }
 }
 
@@ -466,6 +595,7 @@ async function sendSinglePrompt(
   page: Page,
   block: PromptBlock,
   projectFolder: string,
+  workerDownloadDir: string,
   workerLabel: string,
 ): Promise<GeminiSendResult> {
   try {
@@ -507,6 +637,7 @@ async function sendSinglePrompt(
       page,
       imageCountBefore,
       projectFolder,
+      workerDownloadDir,
       block.id,
     );
 
@@ -526,10 +657,12 @@ async function runChromeWorker(
   projectFolder: string,
 ): Promise<GeminiSendResult[]> {
   const workerLabel = `[Chrome ${sessionId}]`;
+  const workerDownloadDir = getWorkerDownloadDir(projectFolder, sessionId);
   const browser = await launchBrowser(false, sessionId);
   const page = await browser.newPage();
 
   try {
+    await ensureDirectory(workerDownloadDir);
     await preparePage(page, { fixedViewport: false });
 
     console.log(`${workerLabel} Opening Gemini: ${env.geminiAppUrl}`);
@@ -550,6 +683,7 @@ async function runChromeWorker(
         page,
         block,
         projectFolder,
+        workerDownloadDir,
         workerLabel,
       );
       results.push(result);

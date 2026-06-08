@@ -16,6 +16,9 @@ coverage/
 .chrome-session/
 .chrome-session-*/
 
+# Temporary Gemini download folders
+.downloads/
+
 # Vite / TypeScript cache
 .vite/
 *.tsbuildinfo
