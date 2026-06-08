@@ -368,6 +368,56 @@ app.post(
   },
 );
 
+app.patch(
+  "/api/prompts/:id",
+  async (req: Request, res: Response): Promise<void> => {
+    const { name } = req.body as { name?: string };
+    const trimmedName = name?.trim();
+
+    if (!trimmedName) {
+      res.status(400).json({
+        success: false,
+        error: "Project name is required",
+      });
+      return;
+    }
+
+    try {
+      const prompt = await ScrapeResponse.findOneAndUpdate(
+        { _id: req.params.id, success: true },
+        { tableName: trimmedName },
+        { new: true },
+      );
+
+      if (!prompt) {
+        res.status(404).json({
+          success: false,
+          error: "Prompt not found",
+        });
+        return;
+      }
+
+      res.json({
+        success: true,
+        prompt: {
+          id: prompt._id,
+          name: prompt.tableName,
+          blockCount: prompt.count ?? 0,
+          sourceUrl: prompt.sourceUrl,
+          scrapedAt: prompt.scrapedAt,
+          createdAt: prompt.createdAt,
+        },
+      });
+    } catch (error) {
+      console.error("Failed to rename prompt:", error);
+      res.status(500).json({
+        success: false,
+        error: "Failed to rename prompt",
+      });
+    }
+  },
+);
+
 app.get("/api/prompts", async (_req: Request, res: Response): Promise<void> => {
   try {
     const prompts = await ScrapeResponse.find(
