@@ -3,13 +3,8 @@ import path from "path";
 import type { Page } from "puppeteer";
 import { launchBrowser, preparePage } from "../browser/session";
 import { env } from "../config/env";
-
-const INPUT_SELECTORS = [
-  "div.text-input-field.simplified-input-area [contenteditable='true']",
-  "div.text-input-field.simplified-input-area",
-  "rich-textarea .ql-editor",
-  "div[contenteditable='true'].ql-editor",
-];
+import { attachReferenceImages } from "./attachments";
+import { findPromptInput, PROMPT_INPUT_SELECTORS } from "./input";
 
 const SEND_BUTTON_SELECTOR = 'button[aria-label="Send message"]';
 const GENERATED_IMAGE_SELECTORS = [
@@ -91,14 +86,9 @@ async function getGeneratedImageCount(page: Page): Promise<number> {
 }
 
 async function findInputElement(page: Page) {
-  for (const selector of INPUT_SELECTORS) {
-    const element = await page.$(selector);
-    if (element) {
-      return { element, selector };
-    }
-  }
-
-  throw new Error("Gemini prompt input not found. Open Gemini and try again.");
+  return findPromptInput(page, {
+    errorMessage: "Gemini prompt input not found. Open Gemini and try again.",
+  });
 }
 
 async function waitForSendButton(page: Page) {
@@ -125,16 +115,7 @@ async function clearPromptInput(page: Page): Promise<void> {
   await delay(200);
 }
 
-async function fillPromptInput(
-  page: Page,
-  promptText: string,
-): Promise<void> {
-  const { element } = await findInputElement(page);
-
-  await element.click();
-  await delay(300);
-  await clearPromptInput(page);
-
+async function typePromptText(page: Page, promptText: string): Promise<void> {
   const insertedWithCdp = await page
     .createCDPSession()
     .then(async (client) => {
@@ -144,14 +125,15 @@ async function fillPromptInput(
     .catch(() => false);
 
   if (!insertedWithCdp) {
-    const insertedWithExecCommand = await page.evaluate((text) => {
-      const input =
-        (document.querySelector(
-          "div.text-input-field.simplified-input-area [contenteditable='true']",
-        ) as HTMLElement | null) ??
-        (document.querySelector(
-          "div.text-input-field.simplified-input-area",
-        ) as HTMLElement | null);
+    const insertedWithExecCommand = await page.evaluate((text, selectors) => {
+      let input: HTMLElement | null = null;
+
+      for (const selector of selectors) {
+        input = document.querySelector(selector) as HTMLElement | null;
+        if (input) {
+          break;
+        }
+      }
 
       if (!input) {
         return false;
@@ -163,26 +145,46 @@ async function fillPromptInput(
       const inserted = document.execCommand("insertText", false, text);
       input.dispatchEvent(new Event("input", { bubbles: true }));
       return inserted;
-    }, promptText);
+    }, promptText, PROMPT_INPUT_SELECTORS);
 
     if (!insertedWithExecCommand) {
       throw new Error("Failed to insert prompt text into Gemini input.");
     }
   } else {
-    await page.evaluate(() => {
-      const input =
-        (document.querySelector(
-          "div.text-input-field.simplified-input-area [contenteditable='true']",
-        ) as HTMLElement | null) ??
-        (document.querySelector(
-          "div.text-input-field.simplified-input-area",
-        ) as HTMLElement | null);
+    await page.evaluate((selectors) => {
+      let input: HTMLElement | null = null;
+
+      for (const selector of selectors) {
+        input = document.querySelector(selector) as HTMLElement | null;
+        if (input) {
+          break;
+        }
+      }
 
       input?.dispatchEvent(new Event("input", { bubbles: true }));
-    });
+    }, PROMPT_INPUT_SELECTORS);
   }
 
   await delay(500);
+}
+
+async function fillPromptInput(
+  page: Page,
+  promptText: string,
+  attachmentImagePaths: string[] = [],
+  workerLabel = "",
+): Promise<void> {
+  const { element } = await findInputElement(page);
+
+  await element.click();
+  await delay(300);
+  await clearPromptInput(page);
+
+  if (attachmentImagePaths.length > 0) {
+    await attachReferenceImages(page, attachmentImagePaths, workerLabel);
+  }
+
+  await typePromptText(page, promptText);
 }
 
 async function clickSendButton(page: Page): Promise<void> {
@@ -597,12 +599,18 @@ async function sendSinglePrompt(
   projectFolder: string,
   workerDownloadDir: string,
   workerLabel: string,
+  attachmentImagePaths: string[] = [],
 ): Promise<GeminiSendResult> {
   try {
     console.log(`${workerLabel} Sending prompt to Gemini: ${block.id}`);
     const imageCountBefore = await getGeneratedImageCount(page);
 
-    await fillPromptInput(page, block.content);
+    await fillPromptInput(
+      page,
+      block.content,
+      attachmentImagePaths,
+      workerLabel,
+    );
     await clickSendButton(page);
 
     const outcome = await waitForGenerationOutcome(page, imageCountBefore);
@@ -655,6 +663,7 @@ async function runChromeWorker(
   sessionId: number,
   prompts: PromptBlock[],
   projectFolder: string,
+  attachmentImagePaths: string[],
 ): Promise<GeminiSendResult[]> {
   const workerLabel = `[Chrome ${sessionId}]`;
   const workerDownloadDir = getWorkerDownloadDir(projectFolder, sessionId);
@@ -674,7 +683,11 @@ async function runChromeWorker(
     });
 
     await delay(3000);
-    await findInputElement(page);
+    await findPromptInput(page, {
+      wait: true,
+      timeoutMs: env.geminiUiTimeoutMs,
+      errorMessage: "Gemini prompt input not found. Open Gemini and try again.",
+    });
 
     const results: GeminiSendResult[] = [];
 
@@ -685,6 +698,7 @@ async function runChromeWorker(
         projectFolder,
         workerDownloadDir,
         workerLabel,
+        attachmentImagePaths,
       );
       results.push(result);
     }
@@ -698,6 +712,7 @@ async function runChromeWorker(
 export async function sendPromptsToGemini(
   prompts: PromptBlock[],
   projectName: string,
+  attachmentImagePaths: string[] = [],
 ): Promise<GeminiSendSummary> {
   if (geminiJobRunning) {
     throw new Error(
@@ -719,6 +734,11 @@ export async function sendPromptsToGemini(
       `Starting ${workerChunks.length} Chrome worker(s) for ${prompts.length} prompt(s)`,
     );
     console.log(`Saving images to: ${projectFolder}`);
+    if (attachmentImagePaths.length > 0) {
+      console.log(
+        `Using ${attachmentImagePaths.length} reference attachment(s) with every prompt`,
+      );
+    }
 
     workerChunks.forEach((chunk) => {
       console.log(
@@ -728,7 +748,12 @@ export async function sendPromptsToGemini(
 
     const workerResults = await Promise.all(
       workerChunks.map((chunk) =>
-        runChromeWorker(chunk.sessionId, chunk.prompts, projectFolder),
+        runChromeWorker(
+          chunk.sessionId,
+          chunk.prompts,
+          projectFolder,
+          attachmentImagePaths,
+        ),
       ),
     );
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { API_URL } from '../config'
 
@@ -9,6 +9,8 @@ interface SavedPrompt {
   sourceUrl: string
   scrapedAt?: string
   createdAt?: string
+  attachmentCount?: number
+  attachmentUrls?: string[]
 }
 
 interface PromptsApiResponse {
@@ -35,6 +37,13 @@ interface RenameApiResponse {
   error?: string
 }
 
+interface AttachApiResponse {
+  success?: boolean
+  message?: string
+  prompt?: SavedPrompt
+  error?: string
+}
+
 function MyPromptsPage() {
   const [prompts, setPrompts] = useState<SavedPrompt[]>([])
   const [loading, setLoading] = useState(true)
@@ -44,6 +53,8 @@ function MyPromptsPage() {
   const [editingName, setEditingName] = useState('')
   const [savingId, setSavingId] = useState<string | null>(null)
   const [statusMessage, setStatusMessage] = useState('')
+  const [uploadingId, setUploadingId] = useState<string | null>(null)
+  const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
   useEffect(() => {
     const fetchPrompts = async () => {
@@ -69,6 +80,55 @@ function MyPromptsPage() {
 
     fetchPrompts()
   }, [])
+
+  const handleAttachClick = (promptId: string) => {
+    fileInputRefs.current[promptId]?.click()
+  }
+
+  const handleAttachChange = async (
+    prompt: SavedPrompt,
+    event: React.ChangeEvent<HTMLInputElement>,
+  ) => {
+    const files = event.target.files
+
+    if (!files || files.length === 0) {
+      return
+    }
+
+    setUploadingId(prompt.id)
+    setStatusMessage('')
+    setError('')
+
+    try {
+      const formData = new FormData()
+      Array.from(files).forEach((file) => {
+        formData.append('images', file)
+      })
+
+      const response = await fetch(`${API_URL}/api/prompts/${prompt.id}/attachments`, {
+        method: 'POST',
+        body: formData,
+      })
+      const data: AttachApiResponse = await response.json()
+
+      if (!response.ok || !data.success || !data.prompt) {
+        setError(data.error || 'Failed to attach images')
+        return
+      }
+
+      setPrompts((currentPrompts) =>
+        currentPrompts.map((currentPrompt) =>
+          currentPrompt.id === prompt.id ? data.prompt! : currentPrompt,
+        ),
+      )
+      setStatusMessage(data.message || 'Images attached')
+    } catch {
+      setError('Failed to connect to the server. Make sure the backend is running.')
+    } finally {
+      setUploadingId(null)
+      event.target.value = ''
+    }
+  }
 
   const handleSend = async (prompt: SavedPrompt) => {
     setSendingId(prompt.id)
@@ -246,17 +306,65 @@ function MyPromptsPage() {
                   <p className="prompt-pillar-meta">
                     {prompt.blockCount} block{prompt.blockCount === 1 ? '' : 's'}
                     {prompt.scrapedAt ? ` · ${prompt.scrapedAt}` : ''}
+                    {prompt.attachmentCount
+                      ? ` · ${prompt.attachmentCount} image${prompt.attachmentCount === 1 ? '' : 's'} attached`
+                      : ''}
                   </p>
+                  {prompt.attachmentUrls && prompt.attachmentUrls.length > 0 && (
+                    <div className="prompt-attachment-previews" aria-label="Attached image previews">
+                      {prompt.attachmentUrls.map((attachmentUrl) => (
+                        <a
+                          key={attachmentUrl}
+                          href={`${API_URL}${attachmentUrl}`}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="prompt-attachment-thumb-link"
+                        >
+                          <img
+                            src={`${API_URL}${attachmentUrl}`}
+                            alt=""
+                            className="prompt-attachment-thumb"
+                            loading="lazy"
+                          />
+                        </a>
+                      ))}
+                    </div>
+                  )}
                 </div>
-                <button
-                  type="button"
-                  className="send-btn"
-                  onClick={() => handleSend(prompt)}
-                  disabled={sendingId !== null || editingId === prompt.id}
-                  aria-label={`Send ${prompt.name} to Gemini`}
-                >
-                  {sendingId === prompt.id ? 'Generating...' : 'Send'}
-                </button>
+                <div className="prompt-pillar-actions">
+                  <input
+                    ref={(element) => {
+                      fileInputRefs.current[prompt.id] = element
+                    }}
+                    type="file"
+                    accept="image/png,image/jpeg,image/jpg,image/webp,image/gif"
+                    multiple
+                    className="hidden-file-input"
+                    onChange={(event) => handleAttachChange(prompt, event)}
+                  />
+                  <button
+                    type="button"
+                    className="attach-btn"
+                    onClick={() => handleAttachClick(prompt.id)}
+                    disabled={
+                      sendingId !== null ||
+                      uploadingId !== null ||
+                      editingId === prompt.id
+                    }
+                    aria-label={`Attach images to ${prompt.name}`}
+                  >
+                    {uploadingId === prompt.id ? 'Attaching...' : 'Attach'}
+                  </button>
+                  <button
+                    type="button"
+                    className="send-btn"
+                    onClick={() => handleSend(prompt)}
+                    disabled={sendingId !== null || editingId === prompt.id}
+                    aria-label={`Send ${prompt.name} to Gemini`}
+                  >
+                    {sendingId === prompt.id ? 'Generating...' : 'Send'}
+                  </button>
+                </div>
               </article>
             ))}
           </div>

@@ -480,6 +480,71 @@ input {
   letter-spacing: 0.02em;
 }
 
+.prompt-attachment-previews {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.prompt-attachment-thumb-link {
+  display: block;
+  flex: 0 0 auto;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  transition: border-color 0.2s, transform 0.2s;
+}
+
+.prompt-attachment-thumb-link:hover {
+  border-color: var(--accent);
+  transform: translateY(-1px);
+}
+
+.prompt-attachment-thumb {
+  display: block;
+  width: 56px;
+  height: 56px;
+  object-fit: cover;
+  background: var(--bg-input);
+}
+
+.prompt-pillar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.attach-btn {
+  flex: 0 0 auto;
+  color: var(--accent);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  min-width: 88px;
+  padding: 10px 18px;
+  transition: background-color 0.2s, border-color 0.2s, color 0.2s, opacity 0.2s;
+}
+
+.attach-btn:hover:not(:disabled) {
+  color: #ffffff;
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.attach-btn:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
 .send-btn {
   flex: 0 0 auto;
   color: #ffffff;
@@ -549,6 +614,12 @@ input {
     grid-template-columns: minmax(0, 1fr) 32px 32px;
   }
 
+  .prompt-pillar-actions {
+    width: 100%;
+    flex-direction: column;
+  }
+
+  .attach-btn,
   .send-btn {
     width: 100%;
   }

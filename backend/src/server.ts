@@ -1,16 +1,49 @@
 import express, { Application, Request, Response } from "express";
 import cors from "cors";
+import path from "path";
 import { Browser, Page } from "puppeteer";
 import { launchBrowser, preparePage } from "./browser/session";
 import { env } from "./config/env";
 import { connectDatabase } from "./db/connect";
 import { sendPromptsToGemini } from "./gemini/automation";
 import { ScrapeResponse } from "./models/ScrapeResponse";
+import {
+  getStoredPathsFromFiles,
+  uploadAttachments,
+} from "./uploads/multer";
+import { resolveStoredUploadPaths } from "./uploads/paths";
 
 const app: Application = express();
 
 app.use(cors());
 app.use(express.json());
+app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+
+function toAttachmentUrl(storedPath: string): string {
+  const normalized = storedPath.replace(/\\/g, "/");
+  return normalized.startsWith("/") ? normalized : `/${normalized}`;
+}
+
+function formatPromptSummary(prompt: {
+  _id: unknown;
+  tableName?: string | null;
+  count?: number | null;
+  sourceUrl: string;
+  scrapedAt?: string | null;
+  createdAt?: Date;
+  attachmentImages?: string[] | null;
+}) {
+  return {
+    id: prompt._id,
+    name: prompt.tableName ?? undefined,
+    blockCount: prompt.count ?? 0,
+    sourceUrl: prompt.sourceUrl,
+    scrapedAt: prompt.scrapedAt,
+    createdAt: prompt.createdAt,
+    attachmentCount: prompt.attachmentImages?.length ?? 0,
+    attachmentUrls: (prompt.attachmentImages ?? []).map(toAttachmentUrl),
+  };
+}
 
 interface ScrapeRequest {
   url: string;
@@ -334,13 +367,23 @@ app.post(
         return;
       }
 
+      const attachmentImagePaths = await resolveStoredUploadPaths(
+        prompt.attachmentImages ?? [],
+      );
+
       console.log(
         `Sending ${blocks.length} prompt block(s) to Gemini for: ${prompt.tableName}`,
       );
+      if (attachmentImagePaths.length > 0) {
+        console.log(
+          `Including ${attachmentImagePaths.length} reference attachment(s)`,
+        );
+      }
 
       const summary = await sendPromptsToGemini(
         blocks,
         prompt.tableName ?? "Untitled Project",
+        attachmentImagePaths,
       );
 
       const skippedNote =
@@ -363,6 +406,57 @@ app.post(
       res.status(500).json({
         success: false,
         error: "Failed to send prompt",
+      });
+    }
+  },
+);
+
+app.post(
+  "/api/prompts/:id/attachments",
+  uploadAttachments.array("images", 10),
+  async (req: Request, res: Response): Promise<void> => {
+    try {
+      const files = req.files as Express.Multer.File[] | undefined;
+
+      if (!files || files.length === 0) {
+        res.status(400).json({
+          success: false,
+          error: "At least one image file is required",
+        });
+        return;
+      }
+
+      const prompt = await ScrapeResponse.findOne({
+        _id: req.params.id,
+        success: true,
+      });
+
+      if (!prompt) {
+        res.status(404).json({
+          success: false,
+          error: "Prompt not found",
+        });
+        return;
+      }
+
+      const storedPaths = getStoredPathsFromFiles(req.params.id, files);
+      prompt.attachmentImages = [
+        ...(prompt.attachmentImages ?? []),
+        ...storedPaths,
+      ];
+      await prompt.save();
+
+      res.json({
+        success: true,
+        message: `${files.length} image(s) attached to project`,
+        prompt: formatPromptSummary(prompt),
+      });
+    } catch (error) {
+      console.error("Failed to upload attachments:", error);
+      res.status(500).json({
+        success: false,
+        error:
+          error instanceof Error ? error.message : "Failed to upload attachments",
       });
     }
   },
@@ -399,14 +493,7 @@ app.patch(
 
       res.json({
         success: true,
-        prompt: {
-          id: prompt._id,
-          name: prompt.tableName,
-          blockCount: prompt.count ?? 0,
-          sourceUrl: prompt.sourceUrl,
-          scrapedAt: prompt.scrapedAt,
-          createdAt: prompt.createdAt,
-        },
+        prompt: formatPromptSummary(prompt),
       });
     } catch (error) {
       console.error("Failed to rename prompt:", error);
@@ -431,20 +518,14 @@ app.get("/api/prompts", async (_req: Request, res: Response): Promise<void> => {
         sourceUrl: 1,
         scrapedAt: 1,
         createdAt: 1,
+        attachmentImages: 1,
       },
     ).sort({ createdAt: -1 });
 
     res.json({
       success: true,
       count: prompts.length,
-      prompts: prompts.map((prompt) => ({
-        id: prompt._id,
-        name: prompt.tableName,
-        blockCount: prompt.count ?? 0,
-        sourceUrl: prompt.sourceUrl,
-        scrapedAt: prompt.scrapedAt,
-        createdAt: prompt.createdAt,
-      })),
+      prompts: prompts.map((prompt) => formatPromptSummary(prompt)),
     });
   } catch (error) {
     console.error("Failed to fetch prompts:", error);

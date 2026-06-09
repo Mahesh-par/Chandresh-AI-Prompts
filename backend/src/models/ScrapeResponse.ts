@@ -18,6 +18,7 @@ const scrapeResponseSchema = new Schema(
     tableName: { type: String },
     ChatTime: { type: String, default: "" },
     scrapedAt: { type: String },
+    attachmentImages: { type: [String], default: [] },
     message: { type: String },
     error: { type: String },
     details: { type: String },
