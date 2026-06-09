@@ -39,6 +39,7 @@ export async function launchBrowser(
     userDataDir: getChromeUserDataDirForSession(sessionId),
     args: isHeaded ? [...STEALTH_ARGS, "--start-maximized"] : STEALTH_ARGS,
     defaultViewport: isHeaded ? null : { width: 1280, height: 800 },
+    protocolTimeout: Math.max(env.geminiGenerationTimeoutMs + 60000, 420000),
   };
 
   if (env.chromeExecutablePath) {
