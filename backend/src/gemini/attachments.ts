@@ -15,6 +15,9 @@ const ATTACH_BUTTON_SELECTORS = [
   'button[aria-label="Attach"]',
 ];
 
+const ATTACHMENT_READY_TIMEOUT_MS = 15000;
+const ATTACHMENT_SETTLE_MS = 3500;
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -42,6 +45,21 @@ async function attachmentPreviewVisible(page: Page): Promise<boolean> {
   });
 }
 
+async function waitForAttachmentReady(page: Page): Promise<boolean> {
+  const deadline = Date.now() + ATTACHMENT_READY_TIMEOUT_MS;
+
+  while (Date.now() < deadline) {
+    if (await attachmentPreviewVisible(page)) {
+      await delay(ATTACHMENT_SETTLE_MS);
+      return true;
+    }
+
+    await delay(500);
+  }
+
+  return false;
+}
+
 async function pasteImageIntoPrompt(
   page: Page,
   imagePath: string,
@@ -50,7 +68,7 @@ async function pasteImageIntoPrompt(
   const fileName = path.basename(imagePath);
   const mimeType = getMimeType(imagePath);
 
-  const pasted = await page.evaluate(
+  const pasteEventDispatched = await page.evaluate(
     async (bytes, name, type, selectors) => {
       let input: HTMLElement | null = null;
 
@@ -82,19 +100,7 @@ async function pasteImageIntoPrompt(
 
         input.dispatchEvent(pasteEvent);
         input.dispatchEvent(new Event("input", { bubbles: true }));
-
-        await new Promise((resolve) => setTimeout(resolve, 1500));
-
-        const previewSelectors = [
-          'img[src^="blob:"]',
-          '[class*="attachment"]',
-          '[class*="upload"]',
-          '[class*="preview"]',
-        ];
-
-        return previewSelectors.some((selector) =>
-          document.querySelector(selector),
-        );
+        return true;
       } catch {
         return false;
       }
@@ -105,7 +111,11 @@ async function pasteImageIntoPrompt(
     PROMPT_INPUT_SELECTORS,
   );
 
-  return pasted;
+  if (!pasteEventDispatched) {
+    return false;
+  }
+
+  return waitForAttachmentReady(page);
 }
 
 async function uploadImageViaHiddenInput(
@@ -121,8 +131,7 @@ async function uploadImageViaHiddenInput(
     await (input as import("puppeteer").ElementHandle<HTMLInputElement>).uploadFile(
       imagePath,
     );
-    await delay(2000);
-    return attachmentPreviewVisible(page);
+    return waitForAttachmentReady(page);
   }
 
   return false;
@@ -145,8 +154,7 @@ async function uploadImageViaFileChooser(
       ]);
 
       await fileChooser.accept([imagePath]);
-      await delay(2000);
-      return attachmentPreviewVisible(page);
+      return waitForAttachmentReady(page);
     } catch {
       continue;
     }
@@ -190,8 +198,7 @@ async function uploadImageViaFileChooser(
     ]);
 
     await fileChooser.accept([imagePath]);
-    await delay(2000);
-    return attachmentPreviewVisible(page);
+    return waitForAttachmentReady(page);
   } catch {
     return false;
   }
@@ -208,7 +215,6 @@ async function attachSingleImage(
 
   if (uploaded) {
     console.log(`${workerLabel} Uploaded attachment: ${path.basename(imagePath)}`);
-    await delay(800);
     return;
   }
 
@@ -217,7 +223,6 @@ async function attachSingleImage(
   const pasted = await pasteImageIntoPrompt(page, imagePath);
   if (pasted) {
     console.log(`${workerLabel} Pasted attachment: ${path.basename(imagePath)}`);
-    await delay(800);
     return;
   }
 

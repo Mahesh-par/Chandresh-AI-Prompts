@@ -487,9 +487,13 @@ input {
   margin-top: 4px;
 }
 
+.prompt-attachment-thumb-wrap {
+  position: relative;
+  flex: 0 0 auto;
+}
+
 .prompt-attachment-thumb-link {
   display: block;
-  flex: 0 0 auto;
   border-radius: 8px;
   overflow: hidden;
   border: 1px solid var(--border);
@@ -507,6 +511,42 @@ input {
   height: 56px;
   object-fit: cover;
   background: var(--bg-input);
+}
+
+.remove-attachment-btn {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #ffffff;
+  background: #d94b4b;
+  border: 1px solid #f08a8a;
+  border-radius: 999px;
+  box-shadow: 0 6px 14px rgba(0, 0, 0, 0.35);
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 1;
+  transition: background-color 0.2s, opacity 0.2s, transform 0.2s;
+}
+
+.remove-attachment-btn:hover:not(:disabled) {
+  background: #ef5f5f;
+  transform: scale(1.05);
+}
+
+.remove-attachment-btn:focus-visible {
+  outline: 3px solid rgba(217, 75, 75, 0.32);
+  outline-offset: 2px;
+}
+
+.remove-attachment-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
 }
 
 .prompt-pillar-actions {

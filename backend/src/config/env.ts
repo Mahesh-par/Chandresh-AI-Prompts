@@ -26,6 +26,7 @@ export const env = {
     process.env.GEMINI_GENERATION_TIMEOUT_MS ?? 300000,
   ),
   geminiBetweenPromptsMs: Number(process.env.GEMINI_BETWEEN_PROMPTS_MS ?? 2000),
+  geminiMaxPromptAttempts: Number(process.env.GEMINI_MAX_PROMPT_ATTEMPTS ?? 2),
   geminiDownloadTimeoutMs: Number(
     process.env.GEMINI_DOWNLOAD_TIMEOUT_MS ?? 60000,
   ),
@@ -36,4 +37,9 @@ export const env = {
     process.env.MOCKUPS_BASE_PATH ??
     "C:\\Users\\par\\Pictures\\Chandresh Mockups",
   chromeWorkerCount: Number(process.env.CHROME_WORKER_COUNT ?? 5),
+  geminiAttachmentWorkerCount: Number(
+    process.env.GEMINI_ATTACHMENT_WORKER_COUNT ??
+      process.env.CHROME_WORKER_COUNT ??
+      5,
+  ),
 };

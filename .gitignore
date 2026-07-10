@@ -12,10 +12,6 @@ coverage/
 # Logs
 *.log
 
-# Puppeteer Chrome session profiles
-.chrome-session/
-.chrome-session-*/
-
 # Temporary Gemini download folders
 .downloads/
 

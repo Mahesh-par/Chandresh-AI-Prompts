@@ -1,5 +1,6 @@
 import express, { Application, Request, Response } from "express";
 import cors from "cors";
+import fs from "fs/promises";
 import path from "path";
 import { Browser, Page } from "puppeteer";
 import { launchBrowser, preparePage } from "./browser/session";
@@ -11,7 +12,11 @@ import {
   getStoredPathsFromFiles,
   uploadAttachments,
 } from "./uploads/multer";
-import { resolveStoredUploadPaths } from "./uploads/paths";
+import {
+  normalizeStoredUploadPath,
+  resolveStoredUploadPath,
+  resolveStoredUploadPaths,
+} from "./uploads/paths";
 
 const app: Application = express();
 
@@ -457,6 +462,73 @@ app.post(
         success: false,
         error:
           error instanceof Error ? error.message : "Failed to upload attachments",
+      });
+    }
+  },
+);
+
+app.delete(
+  "/api/prompts/:id/attachments",
+  async (req: Request, res: Response): Promise<void> => {
+    const { attachmentUrl } = req.body as { attachmentUrl?: string };
+    const normalizedAttachmentPath = attachmentUrl
+      ? normalizeStoredUploadPath(attachmentUrl)
+      : null;
+
+    if (!normalizedAttachmentPath) {
+      res.status(400).json({
+        success: false,
+        error: "Attachment image is required",
+      });
+      return;
+    }
+
+    try {
+      const prompt = await ScrapeResponse.findOne({
+        _id: req.params.id,
+        success: true,
+      });
+
+      if (!prompt) {
+        res.status(404).json({
+          success: false,
+          error: "Prompt not found",
+        });
+        return;
+      }
+
+      const currentAttachments = prompt.attachmentImages ?? [];
+      const nextAttachments = currentAttachments.filter((storedPath) => {
+        const normalizedStoredPath = normalizeStoredUploadPath(storedPath);
+        return normalizedStoredPath !== normalizedAttachmentPath;
+      });
+
+      if (nextAttachments.length === currentAttachments.length) {
+        res.status(404).json({
+          success: false,
+          error: "Attachment image not found",
+        });
+        return;
+      }
+
+      prompt.attachmentImages = nextAttachments;
+      await prompt.save();
+
+      const filePath = resolveStoredUploadPath(normalizedAttachmentPath);
+      if (filePath) {
+        await fs.unlink(filePath).catch(() => undefined);
+      }
+
+      res.json({
+        success: true,
+        message: "Image removed",
+        prompt: formatPromptSummary(prompt),
+      });
+    } catch (error) {
+      console.error("Failed to remove attachment:", error);
+      res.status(500).json({
+        success: false,
+        error: "Failed to remove image",
       });
     }
   },

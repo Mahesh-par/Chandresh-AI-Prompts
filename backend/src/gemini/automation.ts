@@ -6,13 +6,16 @@ import { env } from "../config/env";
 import { attachReferenceImages } from "./attachments";
 import { findPromptInput, PROMPT_INPUT_SELECTORS } from "./input";
 
-const SEND_BUTTON_SELECTOR = 'button[aria-label="Send message"]';
+const SEND_BUTTON_SELECTORS = [
+  'button[aria-label="Send message"]',
+  'button[aria-label="Send"]',
+  'button[aria-label*="Send"]',
+];
 const GENERATED_IMAGE_SELECTORS = [
   "button.image-button img.image",
   ".image-container img.image",
+  "img.image",
 ];
-const DOWNLOAD_BUTTON_SELECTOR =
-  'button[aria-label="Download full-sized image"]';
 
 type GenerationOutcome = "image" | "error" | "no_image";
 
@@ -92,18 +95,19 @@ async function findInputElement(page: Page) {
 }
 
 async function waitForSendButton(page: Page) {
-  await page.waitForSelector(SEND_BUTTON_SELECTOR, {
-    visible: true,
-    timeout: env.geminiUiTimeoutMs,
-  });
-
   await page.waitForFunction(
-    (selector) => {
-      const button = document.querySelector(selector) as HTMLButtonElement | null;
-      return button && !button.disabled;
+    (selectors) => {
+      const buttons = selectors.flatMap((selector) =>
+        Array.from(document.querySelectorAll(selector)) as HTMLButtonElement[],
+      );
+
+      return buttons.some((button) => {
+        const rect = button.getBoundingClientRect();
+        return !button.disabled && rect.width > 0 && rect.height > 0;
+      });
     },
     { timeout: env.geminiUiTimeoutMs },
-    SEND_BUTTON_SELECTOR,
+    SEND_BUTTON_SELECTORS,
   );
 }
 
@@ -189,7 +193,38 @@ async function fillPromptInput(
 
 async function clickSendButton(page: Page): Promise<void> {
   await waitForSendButton(page);
-  await page.click(SEND_BUTTON_SELECTOR);
+
+  const target = await page.evaluate((selectors) => {
+    for (const selector of selectors) {
+      const buttons = Array.from(
+        document.querySelectorAll(selector),
+      ) as HTMLButtonElement[];
+
+      for (let index = buttons.length - 1; index >= 0; index -= 1) {
+        const button = buttons[index];
+        const rect = button.getBoundingClientRect();
+
+        if (!button.disabled && rect.width > 0 && rect.height > 0) {
+          return { selector, index };
+        }
+      }
+    }
+
+    return null;
+  }, SEND_BUTTON_SELECTORS);
+
+  if (!target) {
+    throw new Error("Gemini send button not found or disabled.");
+  }
+
+  const buttons = await page.$$(target.selector);
+  const button = buttons[target.index];
+
+  if (!button) {
+    throw new Error("Gemini send button disappeared before click.");
+  }
+
+  await button.click();
 }
 
 async function waitForGenerationOutcome(
@@ -327,88 +362,6 @@ async function waitForImageElementReady(
   );
 }
 
-async function saveImageFromSrc(
-  page: Page,
-  imageCountBefore: number,
-  savePath: string,
-): Promise<void> {
-  await waitForImageElementReady(page, imageCountBefore);
-
-  const imageData = await page.evaluate(async (selectors, prevCount) => {
-    const allImages: HTMLImageElement[] = [];
-
-    for (const selector of selectors) {
-      allImages.push(
-        ...Array.from(
-          document.querySelectorAll(selector),
-        ) as HTMLImageElement[],
-      );
-    }
-
-    const validImages = allImages.filter(
-      (image) =>
-        !!image.src &&
-        (image.src.startsWith("blob:") || image.src.startsWith("http")),
-    );
-
-    if (validImages.length <= prevCount) {
-      return { error: "No new generated image found." };
-    }
-
-    const latest = validImages[validImages.length - 1];
-    if (!latest?.src) {
-      return { error: "Generated image source URL not found." };
-    }
-
-    try {
-      if (latest.src.startsWith("blob:")) {
-        const canvas = document.createElement("canvas");
-        canvas.width = latest.naturalWidth || latest.width;
-        canvas.height = latest.naturalHeight || latest.height;
-        const context = canvas.getContext("2d");
-
-        if (!context) {
-          throw new Error("Canvas context unavailable.");
-        }
-
-        context.drawImage(latest, 0, 0);
-        const blob = await new Promise<Blob | null>((resolve) =>
-          canvas.toBlob(resolve, "image/png"),
-        );
-
-        if (!blob) {
-          throw new Error("Failed to convert image to blob.");
-        }
-
-        const buffer = await blob.arrayBuffer();
-        return { bytes: Array.from(new Uint8Array(buffer)) };
-      }
-
-      const response = await fetch(latest.src);
-      if (!response.ok) {
-        throw new Error(`Image fetch failed with status ${response.status}`);
-      }
-
-      const buffer = await response.arrayBuffer();
-      return { bytes: Array.from(new Uint8Array(buffer)) };
-    } catch (error) {
-      return {
-        error: error instanceof Error ? error.message : "Image save failed",
-      };
-    }
-  }, GENERATED_IMAGE_SELECTORS, imageCountBefore);
-
-  if (!imageData || "error" in imageData || !("bytes" in imageData)) {
-    throw new Error(
-      imageData && "error" in imageData
-        ? imageData.error
-        : "Failed to download generated image.",
-    );
-  }
-
-  await fs.writeFile(savePath, Buffer.from(imageData.bytes));
-}
-
 async function listFolderFiles(folder: string): Promise<string[]> {
   try {
     return await fs.readdir(folder);
@@ -425,20 +378,36 @@ async function waitForDownloadedFile(
 
   while (Date.now() < deadline) {
     const files = await listFolderFiles(folder);
-    const downloaded = files.find(
-      (file) =>
-        !existingFiles.has(file) &&
-        !file.endsWith(".crdownload") &&
-        !file.endsWith(".tmp"),
+    const candidates = await Promise.all(
+      files
+        .filter(
+          (file) =>
+            !existingFiles.has(file) &&
+            !file.endsWith(".crdownload") &&
+            !file.endsWith(".tmp"),
+        )
+        .map(async (file) => {
+          const filePath = path.join(folder, file);
+          const stats = await fs.stat(filePath).catch(() => null);
+          return stats ? { filePath, size: stats.size, mtimeMs: stats.mtimeMs } : null;
+        }),
     );
 
-    if (downloaded) {
-      const downloadedPath = path.join(folder, downloaded);
-      const stats = await fs.stat(downloadedPath).catch(() => null);
+    const newestCandidates = candidates
+      .filter(
+        (
+          candidate,
+        ): candidate is { filePath: string; size: number; mtimeMs: number } =>
+          !!candidate && candidate.size > 0,
+      )
+      .sort((first, second) => second.mtimeMs - first.mtimeMs);
 
-      if (stats && stats.size > 0) {
-        await delay(1000);
-        return downloadedPath;
+    for (const candidate of newestCandidates) {
+      await delay(1000);
+      const statsAfterDelay = await fs.stat(candidate.filePath).catch(() => null);
+
+      if (statsAfterDelay?.size === candidate.size) {
+        return candidate.filePath;
       }
     }
 
@@ -448,17 +417,113 @@ async function waitForDownloadedFile(
   throw new Error("Timed out waiting for image download.");
 }
 
-async function clickLatestDownloadButton(page: Page): Promise<boolean> {
-  const imageButtons = await page.$$("button.image-button");
-  const latestImageButton = imageButtons[imageButtons.length - 1];
+async function clickVisibleDownloadButton(page: Page): Promise<boolean> {
+  const targetIndex = await page.evaluate(() => {
+    const buttons = Array.from(
+      document.querySelectorAll("button"),
+    ) as HTMLButtonElement[];
 
-  if (!latestImageButton) {
+    for (let index = buttons.length - 1; index >= 0; index -= 1) {
+      const button = buttons[index];
+      const label = button.getAttribute("aria-label")?.toLowerCase() ?? "";
+      const rect = button.getBoundingClientRect();
+
+      if (
+        !button.disabled &&
+        label.includes("download") &&
+        label.includes("image") &&
+        rect.width > 0 &&
+        rect.height > 0
+      ) {
+        return index;
+      }
+    }
+
+    return -1;
+  });
+
+  if (targetIndex >= 0) {
+    const buttons = await page.$$("button");
+    const button = buttons[targetIndex];
+
+    if (button) {
+      await button.click();
+      return true;
+    }
+  }
+
+  return page.evaluate(() => {
+    const buttons = Array.from(
+      document.querySelectorAll("button"),
+    ) as HTMLButtonElement[];
+
+    const button = buttons.reverse().find((candidate) => {
+      const label = candidate.getAttribute("aria-label")?.toLowerCase() ?? "";
+      const rect = candidate.getBoundingClientRect();
+      return (
+        !candidate.disabled &&
+        label.includes("download") &&
+        label.includes("image") &&
+        rect.width > 0 &&
+        rect.height > 0
+      );
+    });
+
+    if (!button) {
+      return false;
+    }
+
+    button.click();
+    return true;
+  });
+}
+
+async function clickLatestDownloadButton(page: Page): Promise<boolean> {
+  const latestImageElement =
+    (await page.$$("button.image-button")).pop() ??
+    (await page.$$(GENERATED_IMAGE_SELECTORS.join(","))).pop();
+
+  if (!latestImageElement) {
     return false;
   }
 
-  await latestImageButton.scrollIntoView();
-  await latestImageButton.hover();
+  await latestImageElement.scrollIntoView();
+  await latestImageElement.hover();
   await delay(1200);
+
+  await page
+    .waitForFunction(
+      () => {
+        const buttons = Array.from(
+          document.querySelectorAll("button"),
+        ) as HTMLButtonElement[];
+
+        return buttons.some((button) => {
+          const label = button.getAttribute("aria-label")?.toLowerCase() ?? "";
+          const rect = button.getBoundingClientRect();
+          return (
+            !button.disabled &&
+            label.includes("download") &&
+            label.includes("image") &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        });
+      },
+      { timeout: 5000 },
+    )
+    .catch(() => undefined);
+
+  if (await clickVisibleDownloadButton(page)) {
+    return true;
+  }
+
+  await latestImageElement.click().catch(() => undefined);
+  await delay(1200);
+
+  if (await clickVisibleDownloadButton(page)) {
+    return true;
+  }
 
   const clickedInContext = await page.evaluate(() => {
     const imageButtons = Array.from(
@@ -473,11 +538,15 @@ async function clickLatestDownloadButton(page: Page): Promise<boolean> {
     let container: Element | null = latestImageButton;
 
     for (let depth = 0; depth < 8 && container; depth += 1) {
-      const downloadButton = container.querySelector(
-        'button[aria-label="Download full-sized image"]',
-      ) as HTMLButtonElement | null;
+      const buttons = Array.from(
+        container.querySelectorAll("button"),
+      ) as HTMLButtonElement[];
+      const downloadButton = buttons.reverse().find((button) => {
+        const label = button.getAttribute("aria-label")?.toLowerCase() ?? "";
+        return label.includes("download") && label.includes("image");
+      });
 
-      if (downloadButton) {
+      if (downloadButton && !downloadButton.disabled) {
         downloadButton.click();
         return true;
       }
@@ -486,10 +555,19 @@ async function clickLatestDownloadButton(page: Page): Promise<boolean> {
     }
 
     const fallbackButtons = Array.from(
-      document.querySelectorAll('button[aria-label="Download full-sized image"]'),
+      document.querySelectorAll("button"),
     ) as HTMLButtonElement[];
 
-    const fallback = fallbackButtons[fallbackButtons.length - 1];
+    const fallback = fallbackButtons
+      .reverse()
+      .find((button) => {
+        const label = button.getAttribute("aria-label")?.toLowerCase() ?? "";
+        return (
+          label.includes("download") &&
+          label.includes("image") &&
+          !button.disabled
+        );
+      });
     if (fallback) {
       fallback.click();
       return true;
@@ -502,15 +580,7 @@ async function clickLatestDownloadButton(page: Page): Promise<boolean> {
     return true;
   }
 
-  const downloadButtons = await page.$$(DOWNLOAD_BUTTON_SELECTOR);
-  const latestDownloadButton = downloadButtons[downloadButtons.length - 1];
-
-  if (!latestDownloadButton) {
-    return false;
-  }
-
-  await latestDownloadButton.click();
-  return true;
+  return clickVisibleDownloadButton(page);
 }
 
 async function downloadViaButton(
@@ -530,7 +600,7 @@ async function downloadViaButton(
   const clicked = await clickLatestDownloadButton(page);
 
   if (!clicked) {
-    throw new Error("Download full-sized image button not found.");
+    throw new Error("Gemini image download button not found.");
   }
 
   const downloadedPath = await waitForDownloadedFile(
@@ -553,19 +623,10 @@ async function downloadLatestGeneratedImage(
   await ensureDirectory(path.dirname(finalSavePath));
   await ensureDirectory(workerDownloadDir);
 
-  try {
-    await saveImageFromSrc(page, imageCountBefore, finalSavePath);
-    console.log(`Saved image to: ${finalSavePath}`);
-    return finalSavePath;
-  } catch (srcError) {
-    console.log(
-      "Direct image save failed, trying download button:",
-      srcError instanceof Error ? srcError.message : srcError,
-    );
-    await downloadViaButton(page, workerDownloadDir, finalSavePath);
-    console.log(`Downloaded image to: ${finalSavePath}`);
-    return finalSavePath;
-  }
+  await waitForImageElementReady(page, imageCountBefore);
+  await downloadViaButton(page, workerDownloadDir, finalSavePath);
+  console.log(`Downloaded image with Gemini button to: ${finalSavePath}`);
+  return finalSavePath;
 }
 
 interface WorkerChunk {
@@ -596,62 +657,98 @@ async function sendSinglePrompt(
   workerLabel: string,
   attachmentImagePaths: string[] = [],
 ): Promise<GeminiSendResult> {
-  try {
-    console.log(`${workerLabel} Sending prompt to Gemini: ${block.id}`);
-    const imageCountBefore = await getGeneratedImageCount(page);
+  const maxAttempts = Math.max(1, Math.floor(env.geminiMaxPromptAttempts));
+  let lastError = "Unknown error";
 
-    await fillPromptInput(
-      page,
-      block.content,
-      attachmentImagePaths,
-      workerLabel,
-    );
-    await clickSendButton(page);
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const attemptLabel =
+      maxAttempts > 1 ? ` (attempt ${attempt}/${maxAttempts})` : "";
+    const isFinalAttempt = attempt === maxAttempts;
 
-    const outcome = await waitForGenerationOutcome(page, imageCountBefore);
-
-    if (outcome === "error") {
+    try {
       console.log(
-        `${workerLabel} Gemini returned an error for ${block.id}. Skipping to next prompt.`,
+        `${workerLabel} Sending prompt to Gemini: ${block.id}${attemptLabel}`,
       );
-      await delay(env.geminiBetweenPromptsMs);
-      return {
-        id: block.id,
-        success: false,
-        skipped: true,
-        error: "gemini_error",
-      };
-    }
+      const imageCountBefore = await getGeneratedImageCount(page);
 
-    if (outcome === "no_image") {
-      console.log(
-        `${workerLabel} No image detected for ${block.id} after generation stopped. Skipping to next prompt.`,
+      await fillPromptInput(
+        page,
+        block.content,
+        attachmentImagePaths,
+        workerLabel,
       );
+      await clickSendButton(page);
+
+      const outcome = await waitForGenerationOutcome(page, imageCountBefore);
+
+      if (outcome === "error") {
+        lastError = "gemini_error";
+        console.log(`${workerLabel} Gemini returned an error for ${block.id}.`);
+
+        if (!isFinalAttempt) {
+          console.log(`${workerLabel} Retrying ${block.id} after Gemini error.`);
+          await delay(Math.max(env.geminiBetweenPromptsMs, 5000));
+          continue;
+        }
+
+        await delay(env.geminiBetweenPromptsMs);
+        return {
+          id: block.id,
+          success: false,
+          skipped: true,
+          error: lastError,
+        };
+      }
+
+      if (outcome === "no_image") {
+        lastError = "no_image_detected";
+        console.log(
+          `${workerLabel} No image detected for ${block.id} after generation stopped.`,
+        );
+
+        if (!isFinalAttempt) {
+          console.log(`${workerLabel} Retrying ${block.id} for a new image.`);
+          await delay(Math.max(env.geminiBetweenPromptsMs, 5000));
+          continue;
+        }
+
+        console.log(`${workerLabel} Skipping ${block.id} after ${maxAttempts} attempt(s).`);
+        await delay(env.geminiBetweenPromptsMs);
+        return {
+          id: block.id,
+          success: false,
+          skipped: true,
+          error: lastError,
+        };
+      }
+
+      const savedPath = await downloadLatestGeneratedImage(
+        page,
+        imageCountBefore,
+        projectFolder,
+        workerDownloadDir,
+        block.id,
+      );
+
       await delay(env.geminiBetweenPromptsMs);
-      return {
-        id: block.id,
-        success: false,
-        skipped: true,
-        error: "no_image_detected",
-      };
+
+      return { id: block.id, success: true, savedPath };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : "Unknown error";
+      console.error(
+        `${workerLabel} Failed on ${block.id}${attemptLabel}:`,
+        lastError,
+      );
+
+      if (!isFinalAttempt) {
+        console.log(`${workerLabel} Retrying ${block.id} after failure.`);
+        await delay(Math.max(env.geminiBetweenPromptsMs, 5000));
+        continue;
+      }
     }
-
-    const savedPath = await downloadLatestGeneratedImage(
-      page,
-      imageCountBefore,
-      projectFolder,
-      workerDownloadDir,
-      block.id,
-    );
-
-    await delay(env.geminiBetweenPromptsMs);
-
-    return { id: block.id, success: true, savedPath };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Unknown error";
-    console.error(`${workerLabel} Failed on ${block.id}:`, message);
-    return { id: block.id, success: false, error: message };
   }
+
+  return { id: block.id, success: false, error: lastError };
 }
 
 async function runChromeWorker(
@@ -721,7 +818,11 @@ export async function sendPromptsToGemini(
 
   geminiJobRunning = true;
   const projectFolder = await ensureProjectFolder(projectName);
-  const workerCount = Math.min(env.chromeWorkerCount, prompts.length);
+  const configuredWorkerCount =
+    attachmentImagePaths.length > 0
+      ? Math.min(env.chromeWorkerCount, env.geminiAttachmentWorkerCount)
+      : env.chromeWorkerCount;
+  const workerCount = Math.max(1, Math.min(configuredWorkerCount, prompts.length));
   const workerChunks = splitPromptsAcrossWorkers(prompts, workerCount);
 
   try {
@@ -733,6 +834,11 @@ export async function sendPromptsToGemini(
       console.log(
         `Using ${attachmentImagePaths.length} reference attachment(s) with every prompt`,
       );
+      if (workerCount < env.chromeWorkerCount) {
+        console.log(
+          `Attachment mode limited to ${workerCount} Chrome worker(s) for reliability`,
+        );
+      }
     }
 
     workerChunks.forEach((chunk) => {

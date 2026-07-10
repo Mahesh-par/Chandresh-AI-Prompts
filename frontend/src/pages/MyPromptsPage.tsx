@@ -44,6 +44,13 @@ interface AttachApiResponse {
   error?: string
 }
 
+interface RemoveAttachmentApiResponse {
+  success?: boolean
+  message?: string
+  prompt?: SavedPrompt
+  error?: string
+}
+
 function MyPromptsPage() {
   const [prompts, setPrompts] = useState<SavedPrompt[]>([])
   const [loading, setLoading] = useState(true)
@@ -54,6 +61,7 @@ function MyPromptsPage() {
   const [savingId, setSavingId] = useState<string | null>(null)
   const [statusMessage, setStatusMessage] = useState('')
   const [uploadingId, setUploadingId] = useState<string | null>(null)
+  const [removingAttachmentKey, setRemovingAttachmentKey] = useState<string | null>(null)
   const fileInputRefs = useRef<Record<string, HTMLInputElement | null>>({})
 
   useEffect(() => {
@@ -127,6 +135,44 @@ function MyPromptsPage() {
     } finally {
       setUploadingId(null)
       event.target.value = ''
+    }
+  }
+
+  const handleRemoveAttachment = async (
+    prompt: SavedPrompt,
+    attachmentUrl: string,
+  ) => {
+    const removeKey = `${prompt.id}:${attachmentUrl}`
+
+    setRemovingAttachmentKey(removeKey)
+    setStatusMessage('')
+    setError('')
+
+    try {
+      const response = await fetch(`${API_URL}/api/prompts/${prompt.id}/attachments`, {
+        method: 'DELETE',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ attachmentUrl }),
+      })
+      const data: RemoveAttachmentApiResponse = await response.json()
+
+      if (!response.ok || !data.success || !data.prompt) {
+        setError(data.error || 'Failed to remove image')
+        return
+      }
+
+      setPrompts((currentPrompts) =>
+        currentPrompts.map((currentPrompt) =>
+          currentPrompt.id === prompt.id ? data.prompt! : currentPrompt,
+        ),
+      )
+      setStatusMessage(data.message || 'Image removed')
+    } catch {
+      setError('Failed to connect to the server. Make sure the backend is running.')
+    } finally {
+      setRemovingAttachmentKey(null)
     }
   }
 
@@ -313,20 +359,38 @@ function MyPromptsPage() {
                   {prompt.attachmentUrls && prompt.attachmentUrls.length > 0 && (
                     <div className="prompt-attachment-previews" aria-label="Attached image previews">
                       {prompt.attachmentUrls.map((attachmentUrl) => (
-                        <a
+                        <div
                           key={attachmentUrl}
-                          href={`${API_URL}${attachmentUrl}`}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="prompt-attachment-thumb-link"
+                          className="prompt-attachment-thumb-wrap"
                         >
-                          <img
-                            src={`${API_URL}${attachmentUrl}`}
-                            alt=""
-                            className="prompt-attachment-thumb"
-                            loading="lazy"
-                          />
-                        </a>
+                          <a
+                            href={`${API_URL}${attachmentUrl}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="prompt-attachment-thumb-link"
+                          >
+                            <img
+                              src={`${API_URL}${attachmentUrl}`}
+                              alt=""
+                              className="prompt-attachment-thumb"
+                              loading="lazy"
+                            />
+                          </a>
+                          <button
+                            type="button"
+                            className="remove-attachment-btn"
+                            onClick={() => handleRemoveAttachment(prompt, attachmentUrl)}
+                            disabled={
+                              sendingId !== null ||
+                              uploadingId !== null ||
+                              removingAttachmentKey !== null
+                            }
+                            aria-label={`Remove attached image from ${prompt.name}`}
+                            title="Remove image"
+                          >
+                            ×
+                          </button>
+                        </div>
                       ))}
                     </div>
                   )}
@@ -349,6 +413,7 @@ function MyPromptsPage() {
                     disabled={
                       sendingId !== null ||
                       uploadingId !== null ||
+                      removingAttachmentKey !== null ||
                       editingId === prompt.id
                     }
                     aria-label={`Attach images to ${prompt.name}`}
@@ -359,7 +424,11 @@ function MyPromptsPage() {
                     type="button"
                     className="send-btn"
                     onClick={() => handleSend(prompt)}
-                    disabled={sendingId !== null || editingId === prompt.id}
+                    disabled={
+                      sendingId !== null ||
+                      removingAttachmentKey !== null ||
+                      editingId === prompt.id
+                    }
                     aria-label={`Send ${prompt.name} to Gemini`}
                   >
                     {sendingId === prompt.id ? 'Generating...' : 'Send'}
